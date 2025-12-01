@@ -40,44 +40,11 @@ async function initializeDatabase() {
 
     const connection = await pool.getConnection();
     console.log('✅ Database connected successfully!');
-    
-    // Create inventory_transactions table if it doesn't exist
-    await createInventoryTransactionsTable(connection);
-    
     connection.release();
     return true;
   } catch (error) {
     console.error('❌ Database connection failed:', error.message);
     return false;
-  }
-}
-
-async function createInventoryTransactionsTable(connection) {
-  try {
-    await connection.execute(`
-      CREATE TABLE IF NOT EXISTS inventory_transactions (
-        id INT PRIMARY KEY AUTO_INCREMENT,
-        product_id INT NOT NULL,
-        user_id INT NOT NULL,
-        type ENUM('IN', 'OUT', 'ADJUST', 'RETURN', 'TRANSFER') NOT NULL,
-        quantity DECIMAL(10,2) NOT NULL,
-        previous_stock DECIMAL(10,2) NOT NULL,
-        new_stock DECIMAL(10,2) NOT NULL,
-        reference VARCHAR(100),
-        notes TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        
-        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-        INDEX idx_product_id (product_id),
-        INDEX idx_user_id (user_id),
-        INDEX idx_created_at (created_at DESC),
-        INDEX idx_type (type)
-      )
-    `);
-    console.log('✅ inventory_transactions table checked/created');
-  } catch (error) {
-    console.error('❌ Error creating inventory_transactions table:', error.message);
   }
 }
 
@@ -125,6 +92,7 @@ const authenticateToken = (req, res, next) => {
 
   jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
     if (err) {
+      console.error('❌ Token verification error:', err.message);
       return res.status(403).json({ message: 'Invalid token' });
     }
     req.user = user;
@@ -132,17 +100,28 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Helper function to log activities
-async function logActivity(type, description, userId, productId = null) {
+// Enhanced Helper function to log activities
+async function logActivity(type, description, userId, productId = null, categoryId = null, metadata = null, ipAddress = null) {
   if (!pool) return;
   
   try {
     await pool.execute(
-      'INSERT INTO activity_logs (type, description, user_id, product_id) VALUES (?, ?, ?, ?)',
-      [type, description, userId, productId]
+      `INSERT INTO activity_logs 
+        (type, description, user_id, product_id, category_id, metadata, ip_address) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        type, 
+        description, 
+        userId, 
+        productId, 
+        categoryId,
+        metadata ? JSON.stringify(metadata) : null,
+        ipAddress
+      ]
     );
+    console.log(`✅ Activity logged: ${type} - ${description}`);
   } catch (error) {
-    console.error('Failed to log activity:', error);
+    console.error('❌ Failed to log activity:', error.message);
   }
 }
 
@@ -155,8 +134,9 @@ async function logInventoryTransaction(productId, userId, type, quantity, previo
       'INSERT INTO inventory_transactions (product_id, user_id, type, quantity, previous_stock, new_stock, reference, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [productId, userId, type, quantity, previousStock, newStock, reference, notes]
     );
+    console.log(`✅ Transaction logged: ${type} for product ${productId}`);
   } catch (error) {
-    console.error('Failed to log inventory transaction:', error);
+    console.error('❌ Failed to log inventory transaction:', error.message);
   }
 }
 
@@ -166,29 +146,34 @@ async function logInventoryTransaction(productId, userId, type, quantity, previo
 app.get('/api/health', async (req, res) => {
   const dbStatus = pool ? 'connected' : 'disconnected';
   
-  // Check if tables exist
-  let activityLogsExists = false;
-  let inventoryTransactionsExists = false;
-  
-  try {
-    if (pool) {
-      await pool.execute('SELECT 1 FROM activity_logs LIMIT 1');
-      activityLogsExists = true;
-      
-      await pool.execute('SELECT 1 FROM inventory_transactions LIMIT 1');
-      inventoryTransactionsExists = true;
-    }
-  } catch (error) {
-    // Tables don't exist or other error
-  }
-  
   res.json({ 
     message: 'Server is running', 
     database: dbStatus,
-    activity_logs_table: activityLogsExists ? '✅ Exists' : '❌ Missing',
-    inventory_transactions_table: inventoryTransactionsExists ? '✅ Exists' : '❌ Missing',
     timestamp: new Date().toISOString() 
   });
+});
+
+// Test endpoint
+app.get('/api/test', authenticateToken, async (req, res) => {
+  try {
+    console.log('🧪 Test endpoint called');
+    
+    // Test database connection
+    const [testResult] = await pool.execute('SELECT 1 as test');
+    
+    res.json({
+      success: true,
+      database: testResult[0].test === 1 ? '✅ Connected' : '❌ Failed',
+      user_id: req.user.userId,
+      message: 'API is working!'
+    });
+  } catch (error) {
+    console.error('Test endpoint error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // Upload profile picture route
@@ -216,8 +201,12 @@ app.post('/api/upload-profile-picture', authenticateToken, upload.single('profil
     // Log activity
     await logActivity(
       'PROFILE_UPDATED',
-      'Updated profile picture',
-      userId
+      'Profile picture uploaded',
+      userId,
+      null,
+      null,
+      { action: 'picture_upload', filename: req.file.filename },
+      req.ip
     );
 
     res.json({
@@ -250,8 +239,12 @@ app.delete('/api/profile/picture', authenticateToken, async (req, res) => {
     // Log activity
     await logActivity(
       'PROFILE_UPDATED',
-      'Removed profile picture',
-      userId
+      'Profile picture removed',
+      userId,
+      null,
+      null,
+      { action: 'picture_remove' },
+      req.ip
     );
 
     res.json({
@@ -275,7 +268,7 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, company_name } = req.body;
     
-    console.log('Registration attempt for:', email);
+    console.log('📝 Registration attempt for:', email);
     
     if (!name || !email || !password) {
       return res.status(400).json({ message: 'Name, email, and password are required' });
@@ -308,11 +301,26 @@ app.post('/api/auth/register', async (req, res) => {
     
     console.log('✅ User registered successfully:', newUser.id);
     
+    // Create default user settings
+    try {
+      await pool.execute(
+        'INSERT INTO user_settings (user_id) VALUES (?)',
+        [result.insertId]
+      );
+      console.log('✅ Default user settings created for user:', result.insertId);
+    } catch (error) {
+      console.error('❌ Failed to create user settings:', error.message);
+    }
+    
     // Log activity
     await logActivity(
       'USER_REGISTERED',
       `New user registered: ${name} (${email})`,
-      result.insertId
+      result.insertId,
+      null,
+      null,
+      { email, company_name: company_name || '' },
+      req.ip
     );
     
     res.status(201).json({ 
@@ -344,7 +352,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    console.log('Login attempt for:', email);
+    console.log('🔑 Login attempt for:', email);
     
     if (!email || !password) {
       return res.status(400).json({ message: 'Email and password are required' });
@@ -388,7 +396,11 @@ app.post('/api/auth/login', async (req, res) => {
     await logActivity(
       'USER_LOGIN',
       'User logged in successfully',
-      user.id
+      user.id,
+      null,
+      null,
+      { email: user.email },
+      req.ip
     );
     
     res.json({
@@ -436,8 +448,12 @@ app.put('/api/profile', authenticateToken, async (req, res) => {
     // Log activity
     await logActivity(
       'PROFILE_UPDATED',
-      `Updated profile information`,
-      userId
+      'Profile information updated',
+      userId,
+      null,
+      null,
+      { name, email, company_name: company_name || '' },
+      req.ip
     );
 
     res.json({ 
@@ -477,6 +493,181 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
   }
 });
 
+// User settings routes
+app.get('/api/user-settings', authenticateToken, async (req, res) => {
+  if (!pool) {
+    return res.status(500).json({ 
+      message: 'Database not connected. Please check server logs.' 
+    });
+  }
+
+  try {
+    const userId = req.user.userId;
+    
+    const [settings] = await pool.execute(
+      'SELECT * FROM user_settings WHERE user_id = ?',
+      [userId]
+    );
+
+    // If no settings exist, create default ones
+    if (settings.length === 0) {
+      const [result] = await pool.execute(
+        'INSERT INTO user_settings (user_id) VALUES (?)',
+        [userId]
+      );
+      
+      const [newSettings] = await pool.execute(
+        'SELECT * FROM user_settings WHERE id = ?',
+        [result.insertId]
+      );
+      
+      res.json(newSettings[0]);
+    } else {
+      res.json(settings[0]);
+    }
+  } catch (error) {
+    console.error('❌ Get user settings error:', error.message);
+    res.status(500).json({ message: 'Error fetching user settings' });
+  }
+});
+
+app.put('/api/user-settings', authenticateToken, async (req, res) => {
+  if (!pool) {
+    return res.status(500).json({ 
+      message: 'Database not connected. Please check server logs.' 
+    });
+  }
+
+  try {
+    const userId = req.user.userId;
+    const { 
+      theme, 
+      language, 
+      notifications_enabled, 
+      email_notifications,
+      items_per_page,
+      default_view,
+      low_stock_threshold,
+      auto_refresh,
+      refresh_interval
+    } = req.body;
+
+    // Convert values to proper types
+    const themeVal = theme || 'light';
+    const languageVal = language || 'en';
+    const notificationsEnabledVal = notifications_enabled !== undefined ? Boolean(notifications_enabled) : true;
+    const emailNotificationsVal = email_notifications !== undefined ? Boolean(email_notifications) : true;
+    const itemsPerPageVal = items_per_page ? parseInt(items_per_page) : 10;
+    const defaultViewVal = default_view || 'table';
+    const lowStockThresholdVal = low_stock_threshold ? parseInt(low_stock_threshold) : 5;
+    const autoRefreshVal = auto_refresh !== undefined ? Boolean(auto_refresh) : false;
+    const refreshIntervalVal = refresh_interval ? parseInt(refresh_interval) : 30;
+
+    // Check if settings exist
+    const [existingSettings] = await pool.execute(
+      'SELECT id FROM user_settings WHERE user_id = ?',
+      [userId]
+    );
+
+    if (existingSettings.length === 0) {
+      // Create new settings
+      const [result] = await pool.execute(
+        `INSERT INTO user_settings (
+          user_id, theme, language, notifications_enabled, email_notifications,
+          items_per_page, default_view, low_stock_threshold, auto_refresh, refresh_interval
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          userId, 
+          themeVal, 
+          languageVal,
+          notificationsEnabledVal,
+          emailNotificationsVal,
+          itemsPerPageVal,
+          defaultViewVal,
+          lowStockThresholdVal,
+          autoRefreshVal,
+          refreshIntervalVal
+        ]
+      );
+
+      const [newSettings] = await pool.execute(
+        'SELECT * FROM user_settings WHERE id = ?',
+        [result.insertId]
+      );
+
+      // Log activity
+      await logActivity(
+        'SETTINGS_UPDATED',
+        'User settings created',
+        userId,
+        null,
+        null,
+        { 
+          theme: themeVal,
+          notifications_enabled: notificationsEnabledVal,
+          items_per_page: itemsPerPageVal
+        },
+        req.ip
+      );
+
+      res.json(newSettings[0]);
+    } else {
+      // Update existing settings
+      await pool.execute(
+        `UPDATE user_settings SET 
+          theme = ?, 
+          language = ?, 
+          notifications_enabled = ?, 
+          email_notifications = ?,
+          items_per_page = ?,
+          default_view = ?,
+          low_stock_threshold = ?,
+          auto_refresh = ?,
+          refresh_interval = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ?`,
+        [
+          themeVal, 
+          languageVal, 
+          notificationsEnabledVal, 
+          emailNotificationsVal,
+          itemsPerPageVal,
+          defaultViewVal,
+          lowStockThresholdVal,
+          autoRefreshVal,
+          refreshIntervalVal,
+          userId
+        ]
+      );
+
+      const [updatedSettings] = await pool.execute(
+        'SELECT * FROM user_settings WHERE user_id = ?',
+        [userId]
+      );
+
+      // Log activity
+      await logActivity(
+        'SETTINGS_UPDATED',
+        'User settings updated',
+        userId,
+        null,
+        null,
+        { 
+          theme: themeVal,
+          notifications_enabled: notificationsEnabledVal,
+          items_per_page: itemsPerPageVal
+        },
+        req.ip
+      );
+
+      res.json(updatedSettings[0]);
+    }
+  } catch (error) {
+    console.error('❌ Update user settings error:', error.message);
+    res.status(500).json({ message: 'Error updating user settings' });
+  }
+});
+
 // Activity logs routes
 app.get('/api/activity-logs', authenticateToken, async (req, res) => {
   if (!pool) {
@@ -488,10 +679,11 @@ app.get('/api/activity-logs', authenticateToken, async (req, res) => {
   try {
     const { limit = 50, type, user_id, product_id } = req.query;
     let query = `
-      SELECT al.*, u.name as user_name, p.name as product_name
+      SELECT al.*, u.name as user_name, p.name as product_name, c.name as category_name
       FROM activity_logs al
       LEFT JOIN users u ON al.user_id = u.id
       LEFT JOIN products p ON al.product_id = p.id
+      LEFT JOIN categories c ON al.category_id = c.id
       WHERE 1=1
     `;
     const params = [];
@@ -513,10 +705,61 @@ app.get('/api/activity-logs', authenticateToken, async (req, res) => {
     params.push(parseInt(limit));
 
     const [logs] = await pool.execute(query, params);
-    res.json(logs);
+    
+    // Parse metadata JSON
+    const logsWithParsedMetadata = logs.map(log => ({
+      ...log,
+      metadata: log.metadata ? JSON.parse(log.metadata) : null
+    }));
+    
+    res.json(logsWithParsedMetadata);
   } catch (error) {
     console.error('❌ Get activity logs error:', error.message);
     res.status(500).json({ message: 'Error fetching activity logs' });
+  }
+});
+
+// Get recent activities for dashboard
+app.get('/api/dashboard/recent-activities', authenticateToken, async (req, res) => {
+  if (!pool) {
+    return res.status(500).json({ 
+      message: 'Database not connected. Please check server logs.' 
+    });
+  }
+
+  try {
+    const [activities] = await pool.execute(`
+      SELECT 
+        al.id,
+        al.type,
+        al.description,
+        al.user_id,
+        al.product_id,
+        al.category_id,
+        al.metadata,
+        al.created_at,
+        COALESCE(u.name, 'System') as user_name,
+        p.name as product_name,
+        p.sku as product_sku,
+        c.name as category_name
+      FROM activity_logs al
+      LEFT JOIN users u ON al.user_id = u.id
+      LEFT JOIN products p ON al.product_id = p.id
+      LEFT JOIN categories c ON al.category_id = c.id
+      ORDER BY al.created_at DESC
+      LIMIT 10
+    `);
+    
+    // Parse metadata JSON
+    const activitiesWithParsedMetadata = activities.map(activity => ({
+      ...activity,
+      metadata: activity.metadata ? JSON.parse(activity.metadata) : null
+    }));
+    
+    res.json(activitiesWithParsedMetadata);
+  } catch (error) {
+    console.error('❌ Recent activities error:', error.message);
+    res.json([]);
   }
 });
 
@@ -697,7 +940,16 @@ app.post('/api/products/:id/adjust-stock', authenticateToken, async (req, res) =
       'STOCK_ADJUSTED',
       `Stock ${type.toLowerCase()} for "${product.name}": ${currentStock} → ${newStock} (Δ: ${quantityNum})`,
       userId,
-      id
+      id,
+      null,
+      { 
+        type: type,
+        quantity: quantityNum,
+        previous_stock: currentStock,
+        new_stock: newStock,
+        notes: notes
+      },
+      req.ip
     );
 
     // Get updated product
@@ -821,9 +1073,12 @@ app.post('/api/products', authenticateToken, async (req, res) => {
     // Log the activity
     await logActivity(
       'PRODUCT_CREATED',
-      `Product "${name}" (SKU: ${sku}) created with initial stock: ${initialStock}`,
+      `Product "${name}" (SKU: ${sku}) created`,
       userId,
-      result.insertId
+      result.insertId,
+      category_id || null,
+      { sku, price, stock: initialStock, min_stock: min_stock || 5 },
+      req.ip
     );
     
     res.status(201).json(newProduct[0]);
@@ -850,20 +1105,24 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
     const { name, description, sku, price, stock, min_stock, category_id } = req.body;
     const userId = req.user.userId;
 
-    // Get current stock and name for comparison and logging
+    // Get current product
     const [currentProduct] = await pool.execute(
-      'SELECT stock, name, sku FROM products WHERE id = ?',
+      'SELECT stock, name, sku, category_id as old_category_id FROM products WHERE id = ?',
       [id]
     );
     
     const currentStock = currentProduct[0]?.stock || 0;
     const productName = currentProduct[0]?.name || '';
     const productSKU = currentProduct[0]?.sku || '';
+    const oldCategoryId = currentProduct[0]?.old_category_id || null;
     
     await pool.execute(
       'UPDATE products SET name = ?, description = ?, sku = ?, price = ?, stock = ?, min_stock = ?, category_id = ? WHERE id = ?',
       [name, description, sku, price, stock, min_stock, category_id, id]
     );
+    
+    // Prepare metadata
+    const metadata = {};
     
     // Log stock change if stock was updated
     if (stock !== undefined && stock != currentStock) {
@@ -881,22 +1140,28 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
         'Stock updated via product edit'
       );
       
-      const activityType = changeAmount > 0 ? 'STOCK_INCREASED' : 'STOCK_DECREASED';
-      await logActivity(
-        activityType,
-        `Stock for "${productName}" (${productSKU}) changed from ${currentStock} to ${stock} (Δ: ${Math.abs(changeAmount)})`,
-        userId,
-        id
-      );
-    } else {
-      // Log general product update if no stock change
-      await logActivity(
-        'PRODUCT_UPDATED',
-        `Product "${productName}" (${productSKU}) details updated`,
-        userId,
-        id
-      );
+      metadata.stock_change = changeAmount;
+      metadata.previous_stock = currentStock;
+      metadata.new_stock = stock;
     }
+    
+    // Log category change if category was updated
+    if (category_id != oldCategoryId) {
+      metadata.category_changed = true;
+      metadata.old_category_id = oldCategoryId;
+      metadata.new_category_id = category_id;
+    }
+    
+    // Log the activity
+    await logActivity(
+      'PRODUCT_UPDATED',
+      `Product "${productName}" (${productSKU}) updated`,
+      userId,
+      id,
+      category_id || null,
+      metadata,
+      req.ip
+    );
     
     const [updatedProduct] = await pool.execute(`
       SELECT p.*, c.name as category_name 
@@ -925,20 +1190,25 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
     
     // Get product info for logging before deletion
     const [product] = await pool.execute(
-      'SELECT name, sku FROM products WHERE id = ?',
+      'SELECT name, sku, category_id FROM products WHERE id = ?',
       [id]
     );
     
     const productName = product[0]?.name || '';
     const productSKU = product[0]?.sku || '';
+    const categoryId = product[0]?.category_id || null;
     
     await pool.execute('DELETE FROM products WHERE id = ?', [id]);
     
-    // Log deletion activity
+    // Log activity
     await logActivity(
       'PRODUCT_DELETED',
       `Product "${productName}" (${productSKU}) deleted`,
-      userId
+      userId,
+      id,
+      categoryId,
+      { sku: productSKU },
+      req.ip
     );
     
     res.json({ message: 'Product deleted successfully' });
@@ -982,8 +1252,6 @@ app.post('/api/categories', authenticateToken, async (req, res) => {
     const { name, description } = req.body;
     const userId = req.user.userId;
     
-    console.log('Creating category:', { name, description });
-    
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Category name is required' });
     }
@@ -998,13 +1266,15 @@ app.post('/api/categories', authenticateToken, async (req, res) => {
       [result.insertId]
     );
     
-    console.log('✅ Category created successfully:', newCategory[0].id);
-    
-    // Log category creation
+    // Log activity
     await logActivity(
       'CATEGORY_CREATED',
       `Category "${name}" created`,
-      userId
+      userId,
+      null,
+      result.insertId,
+      { description: description || '' },
+      req.ip
     );
     
     res.status(201).json(newCategory[0]);
@@ -1055,20 +1325,22 @@ app.put('/api/categories/:id', authenticateToken, async (req, res) => {
       [id]
     );
     
-    // Log category update
-    if (oldName !== name.trim()) {
-      await logActivity(
-        'CATEGORY_UPDATED',
-        `Category renamed from "${oldName}" to "${name}"`,
-        userId
-      );
-    } else {
-      await logActivity(
-        'CATEGORY_UPDATED',
-        `Category "${name}" details updated`,
-        userId
-      );
-    }
+    // Log activity
+    await logActivity(
+      'CATEGORY_UPDATED',
+      oldName !== name.trim() 
+        ? `Category renamed from "${oldName}" to "${name}"`
+        : `Category "${name}" details updated`,
+      userId,
+      null,
+      id,
+      { 
+        old_name: oldName, 
+        new_name: name,
+        description: description || ''
+      },
+      req.ip
+    );
     
     res.json(updatedCategory[0]);
   } catch (error) {
@@ -1114,11 +1386,15 @@ app.delete('/api/categories/:id', authenticateToken, async (req, res) => {
     
     await pool.execute('DELETE FROM categories WHERE id = ?', [id]);
     
-    // Log category deletion
+    // Log activity
     await logActivity(
       'CATEGORY_DELETED',
       `Category "${categoryName}" deleted`,
-      userId
+      userId,
+      null,
+      id,
+      null,
+      req.ip
     );
     
     res.json({ message: 'Category deleted successfully' });
@@ -1144,7 +1420,6 @@ app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
     const [totalValue] = await pool.execute('SELECT SUM(price * stock) as total_value FROM products');
     const [recentActivity] = await pool.execute('SELECT COUNT(*) as recent_activity FROM activity_logs WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)');
     const [todayTransactions] = await pool.execute('SELECT COUNT(*) as today_transactions FROM inventory_transactions WHERE DATE(created_at) = CURDATE()');
-    const [monthlyTransactions] = await pool.execute('SELECT COUNT(*) as monthly_transactions FROM inventory_transactions WHERE MONTH(created_at) = MONTH(NOW()) AND YEAR(created_at) = YEAR(NOW())');
 
     res.json({
       totalProducts: products[0].total_products,
@@ -1153,8 +1428,7 @@ app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
       outOfStock: outOfStock[0].out_of_stock,
       totalValue: totalValue[0].total_value || 0,
       recentActivity: recentActivity[0].recent_activity || 0,
-      todayTransactions: todayTransactions[0].today_transactions || 0,
-      monthlyTransactions: monthlyTransactions[0].monthly_transactions || 0
+      todayTransactions: todayTransactions[0].today_transactions || 0
     });
   } catch (error) {
     console.error('Dashboard stats error:', error);
@@ -1184,31 +1458,6 @@ app.get('/api/alerts/low-stock', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Low stock alerts error:', error);
     res.status(500).json({ message: 'Error fetching low stock alerts' });
-  }
-});
-
-// Get recent activities for dashboard
-app.get('/api/dashboard/recent-activities', authenticateToken, async (req, res) => {
-  if (!pool) {
-    return res.status(500).json({ 
-      message: 'Database not connected. Please check server logs.' 
-    });
-  }
-
-  try {
-    const [activities] = await pool.execute(`
-      SELECT al.*, u.name as user_name, p.name as product_name
-      FROM activity_logs al
-      LEFT JOIN users u ON al.user_id = u.id
-      LEFT JOIN products p ON al.product_id = p.id
-      ORDER BY al.created_at DESC
-      LIMIT 10
-    `);
-    
-    res.json(activities);
-  } catch (error) {
-    console.error('Recent activities error:', error);
-    res.status(500).json({ message: 'Error fetching recent activities' });
   }
 });
 
@@ -1282,7 +1531,7 @@ app.use('*', (req, res) => {
 });
 
 app.use((error, req, res, next) => {
-  console.error('Global error handler:', error);
+  console.error('❌ Global error handler:', error);
   res.status(500).json({ 
     message: 'Internal server error',
     error: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -1294,6 +1543,5 @@ app.listen(PORT, () => {
   console.log(`📍 Health check: http://localhost:${PORT}/api/health`);
   console.log(`📍 Uploads: http://localhost:${PORT}/uploads/`);
   console.log(`📍 Database: ${pool ? '✅ Connected' : '❌ Disconnected'}`);
-  console.log(`📍 Using existing activity_logs table ✅`);
-  console.log(`📍 Creating inventory_transactions table (6th table) ✅`);
+  console.log(`📊 Enhanced activity logging system ready!`);
 });

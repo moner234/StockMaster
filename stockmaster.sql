@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Dec 01, 2025 at 11:45 AM
+-- Generation Time: Dec 01, 2025 at 12:40 PM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -29,11 +29,12 @@ SET time_zone = "+00:00";
 
 CREATE TABLE `activity_logs` (
   `id` int(11) NOT NULL,
-  `user_id` int(11) DEFAULT NULL,
-  `action_type` enum('create','update','delete','login','logout') NOT NULL,
-  `resource_type` enum('product','category','user','system') NOT NULL,
-  `resource_id` int(11) DEFAULT NULL,
+  `type` varchar(50) NOT NULL COMMENT 'USER_LOGIN, PRODUCT_CREATED, CATEGORY_UPDATED, etc.',
   `description` text NOT NULL,
+  `user_id` int(11) DEFAULT NULL,
+  `product_id` int(11) DEFAULT NULL,
+  `category_id` int(11) DEFAULT NULL,
+  `metadata` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL COMMENT 'Additional data in JSON format' CHECK (json_valid(`metadata`)),
   `ip_address` varchar(45) DEFAULT NULL,
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -57,7 +58,8 @@ CREATE TABLE `categories` (
 --
 
 INSERT INTO `categories` (`id`, `name`, `description`, `created_at`, `updated_at`) VALUES
-(2, 'Muslim', 'Moner dakog itlog', '2025-11-28 18:38:06', '2025-11-28 18:38:06');
+(2, 'Muslim', 'Moner dakog itlog', '2025-11-28 18:38:06', '2025-11-28 18:38:06'),
+(3, 'test', 'test', '2025-12-01 10:48:48', '2025-12-01 10:48:48');
 
 -- --------------------------------------------------------
 
@@ -78,6 +80,14 @@ CREATE TABLE `inventory_transactions` (
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+--
+-- Dumping data for table `inventory_transactions`
+--
+
+INSERT INTO `inventory_transactions` (`id`, `product_id`, `user_id`, `type`, `quantity`, `previous_stock`, `new_stock`, `reference`, `notes`, `created_at`) VALUES
+(1, 3, 1, 'IN', 10000.00, 0.00, 10000.00, 'INITIAL_STOCK', 'Initial stock when product was created', '2025-12-01 10:49:51'),
+(2, 4, 1, 'IN', 99999999.99, 0.00, 99999999.99, 'INITIAL_STOCK', 'Initial stock when product was created', '2025-12-01 11:20:32');
+
 -- --------------------------------------------------------
 
 --
@@ -97,6 +107,14 @@ CREATE TABLE `products` (
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `products`
+--
+
+INSERT INTO `products` (`id`, `name`, `description`, `sku`, `price`, `stock`, `min_stock`, `category_id`, `image`, `created_at`, `updated_at`) VALUES
+(3, 'saging hilaw', 'baligya', 'SAG-HIL-12345', 100.00, 10000, 50, 3, NULL, '2025-12-01 10:49:51', '2025-12-01 10:49:51'),
+(4, 'wkwkwk', '', 'WKWK-123', 1111111.00, 1111111111, 11111111, 3, NULL, '2025-12-01 11:20:32', '2025-12-01 11:20:32');
 
 -- --------------------------------------------------------
 
@@ -137,6 +155,13 @@ CREATE TABLE `user_settings` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
+-- Dumping data for table `user_settings`
+--
+
+INSERT INTO `user_settings` (`id`, `user_id`, `settings`, `created_at`, `updated_at`) VALUES
+(1, 1, NULL, '2025-12-01 11:05:43', '2025-12-01 11:05:43');
+
+--
 -- Indexes for dumped tables
 --
 
@@ -145,7 +170,11 @@ CREATE TABLE `user_settings` (
 --
 ALTER TABLE `activity_logs`
   ADD PRIMARY KEY (`id`),
-  ADD KEY `user_id` (`user_id`);
+  ADD KEY `idx_created_at` (`created_at`),
+  ADD KEY `idx_user_id` (`user_id`),
+  ADD KEY `idx_type` (`type`),
+  ADD KEY `idx_product_id` (`product_id`),
+  ADD KEY `idx_category_id` (`category_id`);
 
 --
 -- Indexes for table `categories`
@@ -198,19 +227,19 @@ ALTER TABLE `activity_logs`
 -- AUTO_INCREMENT for table `categories`
 --
 ALTER TABLE `categories`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
 
 --
 -- AUTO_INCREMENT for table `inventory_transactions`
 --
 ALTER TABLE `inventory_transactions`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
 
 --
 -- AUTO_INCREMENT for table `products`
 --
 ALTER TABLE `products`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
 
 --
 -- AUTO_INCREMENT for table `users`
@@ -222,17 +251,11 @@ ALTER TABLE `users`
 -- AUTO_INCREMENT for table `user_settings`
 --
 ALTER TABLE `user_settings`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
 
 --
 -- Constraints for dumped tables
 --
-
---
--- Constraints for table `activity_logs`
---
-ALTER TABLE `activity_logs`
-  ADD CONSTRAINT `activity_logs_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL;
 
 --
 -- Constraints for table `inventory_transactions`
